@@ -56,9 +56,12 @@ fun BatteryView(
     budsRes: Int,
     caseRes: Int
 ) {
-    val left = batteryList.find { it.component == BatteryComponent.LEFT }
-    val right = batteryList.find { it.component == BatteryComponent.RIGHT }
-    val case = batteryList.find { it.component == BatteryComponent.CASE }
+    // AirPods Max report one over-ear battery and have no case; feed it to both
+    // sides so the existing "left and right agree" path renders a single reading.
+    val headset = batteryList.find { it.component == BatteryComponent.HEADSET }
+    val left = headset ?: batteryList.find { it.component == BatteryComponent.LEFT }
+    val right = headset ?: batteryList.find { it.component == BatteryComponent.RIGHT }
+    val case = if (headset != null) null else batteryList.find { it.component == BatteryComponent.CASE }
 
     val leftLevel = left?.level ?: 0
     val rightLevel = right?.level ?: 0
@@ -125,24 +128,26 @@ fun BatteryView(
                 }
             }
 
-            Column(
-                modifier = Modifier.weight(1f),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Image(
-                    bitmap = ImageBitmap.imageResource(caseRes),
-                    contentDescription = stringResource(R.string.case_alt),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp)
-                )
-
-                if (caseLevel > 0 || case?.status != BatteryStatus.DISCONNECTED) {
-                    BatteryIndicator(
-                        caseLevel,
-                        case?.status ?: BatteryStatus.NOT_CHARGING,
-                        prefix = if (!singleDisplayed.value) "\uDBC3\uDE6C" else ""
+            if (headset == null) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Image(
+                        bitmap = ImageBitmap.imageResource(caseRes),
+                        contentDescription = stringResource(R.string.case_alt),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp)
                     )
+
+                    if (caseLevel > 0 || case?.status != BatteryStatus.DISCONNECTED) {
+                        BatteryIndicator(
+                            caseLevel,
+                            case?.status ?: BatteryStatus.NOT_CHARGING,
+                            prefix = if (!singleDisplayed.value) "\uDBC3\uDE6C" else ""
+                        )
+                    }
                 }
             }
         }

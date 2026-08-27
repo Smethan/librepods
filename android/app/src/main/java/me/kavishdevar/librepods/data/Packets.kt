@@ -33,9 +33,17 @@ enum class Enums(val value: ByteArray) {
 }
 
 object BatteryComponent {
+    /** Single over-ear battery, reported by AirPods Max instead of LEFT/RIGHT/CASE. */
+    const val HEADSET = 1
     const val LEFT = 4
     const val RIGHT = 2
     const val CASE = 8
+
+    /** All components in the order they should be presented to the user. */
+    val ALL = listOf(HEADSET, LEFT, RIGHT, CASE)
+
+    /** Components that represent something worn on the head, i.e. not the case. */
+    val WORN = listOf(HEADSET, LEFT, RIGHT)
 }
 
 object BatteryStatus {
@@ -49,6 +57,7 @@ object BatteryStatus {
 data class Battery(val component: Int, val level: Int, val status: Int) : Parcelable {
     fun getComponentName(): String? {
         return when (component) {
+            BatteryComponent.HEADSET -> "HEADSET"
             BatteryComponent.LEFT -> "LEFT"
             BatteryComponent.RIGHT -> "RIGHT"
             BatteryComponent.CASE -> "CASE"
@@ -153,23 +162,41 @@ class AirPodsNotifications {
 
     }
 
+    /**
+     * Parses AACP battery packets (opcode 0x04).
+     *
+     * Layout: `04 00 04 00 04 00 <count>` followed by `count` five byte entries of
+     * `<component> 01 <level> <status> 01`. Devices report a different number of
+     * components: earbuds with a case report three (left, right, case), while
+     * AirPods Max report a single [BatteryComponent.HEADSET] entry. Anything that
+     * assumes exactly three components silently drops AirPods Max battery data.
+     */
     class BatteryNotification {
-        private var first: Battery = Battery(BatteryComponent.LEFT, 0, BatteryStatus.DISCONNECTED)
-        private var second: Battery = Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED)
-        private var case: Battery = Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
+        private val states = LinkedHashMap<Int, Battery>()
+
+        /** Components the device actually reported, in presentation order. */
+        val reportedComponents: List<Int>
+            get() = BatteryComponent.ALL.filter { states.containsKey(it) }
+
+        /** True once the device has told us it has a single over-ear battery. */
+        val isHeadset: Boolean
+            get() = states.containsKey(BatteryComponent.HEADSET)
 
         fun isBatteryData(data: ByteArray): Boolean {
-            if (data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")) {
-                Log.d("BatteryNotification", "Battery data starts with 040004000400. Most likely is a battery packet.")
-            } else {
+            if (data.size < HEADER_SIZE) return false
+            if (!data.joinToString("") { "%02x".format(it) }.startsWith(PREFIX_HEX)) {
                 return false
             }
-            if (data.size != 22) {
-                Log.d("BatteryNotification", "Battery data size is not 22, probably being used with Airpods with fewer or more battery count.")
+            val count = data[COUNT_INDEX].toInt() and 0xFF
+            if (count !in 1..MAX_COMPONENTS) {
+                Log.d("BatteryNotification", "Battery data reports an implausible component count: $count")
                 return false
             }
-            Log.d("BatteryNotification", data.joinToString("") { "%02x".format(it) }.startsWith("040004000400").toString())
-            return data.joinToString("") { "%02x".format(it) }.startsWith("040004000400")
+            if (data.size != HEADER_SIZE + ENTRY_SIZE * count) {
+                Log.d("BatteryNotification", "Battery data size ${data.size} does not match a count of $count")
+                return false
+            }
+            return true
         }
 
         fun setBatteryDirect(
@@ -178,48 +205,101 @@ class AirPodsNotifications {
             rightLevel: Int,
             rightCharging: Boolean,
             caseLevel: Int,
-            caseCharging: Boolean
+            caseCharging: Boolean,
+            headset: Boolean = false
         ) {
-            first = Battery(BatteryComponent.LEFT, leftLevel, if (leftCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
-            second = Battery(BatteryComponent.RIGHT, rightLevel, if (rightCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
-            case = Battery(BatteryComponent.CASE, caseLevel, if (caseCharging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING)
-        }
+            fun status(charging: Boolean) =
+                if (charging) BatteryStatus.CHARGING else BatteryStatus.NOT_CHARGING
 
-        fun setBattery(data: ByteArray) {
-            if (data.size != 22) {
+            states.clear()
+            if (headset) {
+                // BLE advertisements always carry pod-shaped battery bytes; for an
+                // over-ear headset only one of them is meaningful.
+                val (level, charging) = listOf(
+                    leftLevel to leftCharging,
+                    rightLevel to rightCharging,
+                    caseLevel to caseCharging
+                ).firstOrNull { it.first in 1..100 } ?: (leftLevel to leftCharging)
+                states[BatteryComponent.HEADSET] =
+                    Battery(BatteryComponent.HEADSET, level, status(charging))
                 return
             }
-//            first = if (data[10].toInt() == BatteryStatus.DISCONNECTED) {
-//                Battery(first.component, first.level, data[10].toInt())
-//            } else {
-//                Battery(data[7].toInt(), data[9].toInt(), data[10].toInt())
-//            }
-//            second = if (data[15].toInt() == BatteryStatus.DISCONNECTED) {
-//                Battery(second.component, second.level, data[15].toInt())
-//            } else {
-//                Battery(data[12].toInt(), data[14].toInt(), data[15].toInt())
-//            }
-//            case = if (data[20].toInt() == BatteryStatus.DISCONNECTED && case.status != BatteryStatus.DISCONNECTED) {
-//                Battery(case.component, case.level, data[20].toInt())
-//            } else {
-//                Battery(data[17].toInt(), data[19].toInt(), data[20].toInt())
-//            }
-//            sometimes it shows battery as -1%, just skip all that and set it normally
-            first = Battery(
-                data[7].toInt(), data[9].toInt(), data[10].toInt()
-            )
-            second = Battery(
-                data[12].toInt(), data[14].toInt(), data[15].toInt()
-            )
-            case = Battery(
-                data[17].toInt(), data[19].toInt(), data[20].toInt()
-            )
+            states[BatteryComponent.LEFT] =
+                Battery(BatteryComponent.LEFT, leftLevel, status(leftCharging))
+            states[BatteryComponent.RIGHT] =
+                Battery(BatteryComponent.RIGHT, rightLevel, status(rightCharging))
+            states[BatteryComponent.CASE] =
+                Battery(BatteryComponent.CASE, caseLevel, status(caseCharging))
         }
 
+        fun setBattery(data: ByteArray): Boolean {
+            if (!isBatteryData(data)) return false
+
+            val count = data[COUNT_INDEX].toInt() and 0xFF
+            val parsed = LinkedHashMap<Int, Battery>()
+            for (i in 0 until count) {
+                val offset = HEADER_SIZE + ENTRY_SIZE * i
+                val component = data[offset].toInt() and 0xFF
+                if (component !in BatteryComponent.ALL) {
+                    Log.d("BatteryNotification", "Ignoring unknown battery component 0x%02x".format(component))
+                    continue
+                }
+                val rawLevel = data[offset + 2].toInt() and 0xFF
+                val status = data[offset + 3].toInt() and 0xFF
+                // The firmware reports 0xFF (and occasionally other out of range
+                // values) when a level is unknown; keep the last one we saw
+                // instead of rendering it as -1% or 255%.
+                val level = if (rawLevel in 0..100) rawLevel else states[component]?.level ?: 0
+                parsed[component] = Battery(component, level, status)
+            }
+
+            if (parsed.isEmpty()) return false
+
+            states.clear()
+            states.putAll(parsed)
+            return true
+        }
+
+        /**
+         * The components the device reported. Before anything has been received
+         * this falls back to the classic left/right/case triple so existing
+         * consumers keep seeing a stable, disconnected list.
+         */
         fun getBattery(): List<Battery> {
-            val left = if (first.component == BatteryComponent.LEFT) first else second
-            val right = if (first.component == BatteryComponent.LEFT) second else first
-            return listOf(left, right, case)
+            if (states.isEmpty()) return DISCONNECTED_DEFAULTS
+            return BatteryComponent.ALL.mapNotNull { states[it] }
+        }
+
+        /**
+         * Lowest level across the components worn on the head, which is what the
+         * island, notification and system battery indicator should show. Returns
+         * null when nothing usable has been reported yet.
+         */
+        fun getWornLevel(): Int? {
+            return BatteryComponent.WORN
+                .mapNotNull { states[it] }
+                .filter { it.status != BatteryStatus.DISCONNECTED }
+                .minOfOrNull { it.level }
+        }
+
+        /** True when every component worn on the head reports charging. */
+        fun isWornCharging(): Boolean {
+            val worn = BatteryComponent.WORN.mapNotNull { states[it] }
+            return worn.isNotEmpty() && worn.all { it.status == BatteryStatus.CHARGING }
+        }
+
+        companion object {
+            private const val PREFIX_HEX = "040004000400"
+            private const val COUNT_INDEX = 6
+            private const val HEADER_SIZE = 7
+            private const val ENTRY_SIZE = 5
+            private const val MAX_COMPONENTS = 3
+
+            private val DISCONNECTED_DEFAULTS = listOf(
+                Battery(BatteryComponent.LEFT, 0, BatteryStatus.DISCONNECTED),
+                Battery(BatteryComponent.RIGHT, 0, BatteryStatus.DISCONNECTED),
+                Battery(BatteryComponent.CASE, 0, BatteryStatus.DISCONNECTED)
+            )
         }
     }
 

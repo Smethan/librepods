@@ -35,6 +35,7 @@ extern "C" {
 
 #define LOG_TAG "LibrePodsHook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static HookFunType hook_func = nullptr;
@@ -46,12 +47,14 @@ static tBTA_STATUS (*original_BTA_DmSetLocalDiRecord)(tSDP_DI_RECORD *, uint32_t
 static std::atomic<bool> enableSdpHook(false);
 
 uint8_t fake_l2c_fcr_chk_chan_modes(void *p_ccb) {
-    LOGI("fake_l2c_fcr_chk_chan_modes called");
     uint8_t orig = 0;
     if (original_l2c_fcr_chk_chan_modes)
         orig = original_l2c_fcr_chk_chan_modes(p_ccb);
 
-    LOGI("fake_l2c_fcr_chk_chan_modes: orig = %d, returning 1", orig);
+    // This runs for every L2CAP channel the whole stack sets up, so keep it at
+    // debug level: info logging here floods logcat from inside the Bluetooth
+    // process.
+    LOGD("fake_l2c_fcr_chk_chan_modes: orig = %d, returning 1", orig);
     return 1;
 }
 
@@ -59,23 +62,32 @@ tBTA_STATUS fake_BTA_DmSetLocalDiRecord(tSDP_DI_RECORD *p_device_info, uint32_t 
 
     LOGI("fake_BTA_DmSetLocalDiRecord called");
 
-    if (original_BTA_DmSetLocalDiRecord &&
-        enableSdpHook.load(std::memory_order_relaxed))
-        original_BTA_DmSetLocalDiRecord(p_device_info, p_handle);
-
-    LOGI("fake_BTA_DmSetLocalDiRecord: modifying vendor to 0x004C, vendor_id_source to 0x0001");
-
-    if (p_device_info) {
-        p_device_info->vendor = 0x004C;
-        p_device_info->vendor_id_source = 0x0001;
+    if (!original_BTA_DmSetLocalDiRecord) {
+        LOGE("fake_BTA_DmSetLocalDiRecord: no original to call");
+        return BTA_FAILURE;
     }
 
-    LOGI("fake_BTA_DmSetLocalDiRecord: returning status %d",
-         original_BTA_DmSetLocalDiRecord ? original_BTA_DmSetLocalDiRecord(p_device_info, p_handle)
-                                         : BTA_FAILURE);
-    return original_BTA_DmSetLocalDiRecord ? original_BTA_DmSetLocalDiRecord(p_device_info,
-                                                                             p_handle)
-                                           : BTA_FAILURE;
+    // This registers a Device Identification record in the local SDP database,
+    // and every call adds another one. It used to be invoked up to three times
+    // per call - once with the untouched record when the hook was enabled, then
+    // twice more with the patched record (once just to build a log line) - which
+    // published conflicting DI records and leaked SDP handles. Patch once, call
+    // once.
+    if (enableSdpHook.load(std::memory_order_relaxed)) {
+        if (p_device_info) {
+            LOGI("fake_BTA_DmSetLocalDiRecord: modifying vendor to 0x004C, vendor_id_source to 0x0001");
+            p_device_info->vendor = 0x004C;
+            p_device_info->vendor_id_source = 0x0001;
+        }
+    } else {
+        // The toggle used to be ignored here: the vendor was rewritten and the
+        // record registered twice whether or not the user had enabled the hook.
+        LOGI("fake_BTA_DmSetLocalDiRecord: sdp hook disabled, leaving the record alone");
+    }
+
+    tBTA_STATUS status = original_BTA_DmSetLocalDiRecord(p_device_info, p_handle);
+    LOGI("fake_BTA_DmSetLocalDiRecord: returning status %d", status);
+    return status;
 }
 
 static bool decompressXZ(const uint8_t *input, size_t input_size, std::vector<uint8_t> &output) {

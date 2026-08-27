@@ -133,8 +133,10 @@ class IslandWindow(private val context: Context) {
     private fun updateBatteryDisplay(batteryList: ArrayList<Battery>?) {
         if (batteryList == null || batteryList.isEmpty()) return
 
-        val leftBattery = batteryList.find { it.component == BatteryComponent.LEFT }
-        val rightBattery = batteryList.find { it.component == BatteryComponent.RIGHT }
+        // AirPods Max report a single over-ear battery instead of left/right.
+        val headsetBattery = batteryList.find { it.component == BatteryComponent.HEADSET }
+        val leftBattery = headsetBattery ?: batteryList.find { it.component == BatteryComponent.LEFT }
+        val rightBattery = headsetBattery ?: batteryList.find { it.component == BatteryComponent.RIGHT }
 
         val leftLevel = leftBattery?.level ?: 0
         val rightLevel = rightBattery?.level ?: 0
@@ -178,8 +180,9 @@ class IslandWindow(private val context: Context) {
         val batteryProgressBar = islandView.findViewById<ProgressBar>(R.id.island_battery_progress)
 
         val displayBatteryLevel = if (batteryList != null) {
-            val leftBattery = batteryList.find { it.component == BatteryComponent.LEFT }
-            val rightBattery = batteryList.find { it.component == BatteryComponent.RIGHT }
+            val headsetBattery = batteryList.find { it.component == BatteryComponent.HEADSET }
+            val leftBattery = headsetBattery ?: batteryList.find { it.component == BatteryComponent.LEFT }
+            val rightBattery = headsetBattery ?: batteryList.find { it.component == BatteryComponent.RIGHT }
 
             when {
                 (leftBattery?.level ?: 0) > 0 && (rightBattery?.level ?: 0) > 0 ->

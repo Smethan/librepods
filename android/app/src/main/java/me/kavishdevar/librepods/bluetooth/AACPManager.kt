@@ -34,6 +34,9 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  */
 class AACPManager {
     private val TAG = "AACPManager[${System.identityHashCode(this)}]"
+
+    /** Serialises writes to the shared L2CAP output stream. */
+    private val writeLock = Any()
     companion object {
         @Suppress("unused")
         object Opcodes {
@@ -397,8 +400,28 @@ class AACPManager {
         return opcode + data
     }
 
-    @OptIn(ExperimentalStdlibApi::class)
+    /**
+     * Entry point for everything read off the AACP socket.
+     *
+     * The individual parsers below assume packet shapes taken from the models
+     * they were reverse engineered against, and several of them throw outright on
+     * anything else. That exception used to escape into the socket read loop,
+     * which treats any exception as a disconnect - so one unexpected packet from
+     * an unfamiliar model tore down the whole session. Nothing a peer sends us is
+     * worth dropping the connection over.
+     */
     fun receivePacket(packet: ByteArray) {
+        try {
+            dispatchPacket(packet)
+        } catch (e: Exception) {
+            Log.e(
+                TAG, "Error handling packet ${packet.joinToString(" ") { "%02X".format(it) }}", e
+            )
+        }
+    }
+
+    @OptIn(ExperimentalStdlibApi::class)
+    private fun dispatchPacket(packet: ByteArray) {
         if (!packet.toHexString().startsWith("04000400")) {
             Log.w(
                 TAG, "Received packet does not start with expected header: ${
@@ -597,7 +620,16 @@ class AACPManager {
 
             Opcodes.INFORMATION -> {
                 Log.d(TAG, "Parsing Information Packet")
-                val information = parseInformationPacket(packet)
+                val information = try {
+                    parseInformationPacket(packet)
+                } catch (e: Exception) {
+                    // A parse failure here used to propagate all the way out of
+                    // the socket read loop, which treats any exception as a
+                    // disconnect.
+                    Log.w(TAG, "Failed to parse information packet: ${e.message}")
+                    callback?.onUnknownPacketReceived(packet)
+                    return
+                }
                 callback?.onDeviceInformationReceived(information)
             }
 
@@ -1162,8 +1194,15 @@ class AACPManager {
             val socket = BluetoothConnectionManager.aacpSocket ?: return false
 
             if (socket.isConnected) {
-                socket.outputStream?.write(packet)
-                socket.outputStream?.flush()
+                // Packets are sent from the main thread, IO coroutines, handler
+                // callbacks and UI callbacks. Interleaved writes produce malformed
+                // AACP frames, which the AirPods answer by tearing the L2CAP
+                // channel down. (ATTManager already serialises its writes.)
+                val output = socket.outputStream ?: return false
+                synchronized(writeLock) {
+                    output.write(packet)
+                    output.flush()
+                }
                 return true
             } else {
                 Log.d(TAG, "Can't send packet: Socket not initialized or connected")
@@ -1297,7 +1336,9 @@ class AACPManager {
             strings.add(str)
         }
 
-        strings.removeAt(0) // I'm too lazy to adjust, just removing the first empty string
+        // Drops the leading empty string; a packet that yields none at all would
+        // otherwise throw out of the read loop.
+        if (strings.isNotEmpty()) strings.removeAt(0)
 
         return AirPodsInformation(
             name = strings.getOrNull(0) ?: "",

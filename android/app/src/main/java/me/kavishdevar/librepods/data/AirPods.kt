@@ -30,7 +30,12 @@ open class AirPodsBase(
     val leftBudsRes: Int,
     val rightBudsRes: Int,
     val caseRes: Int,
-    val capabilities: Set<Capability>
+    val capabilities: Set<Capability>,
+    /**
+     * True for over-ear models (AirPods Max) which report a single `HEADSET`
+     * battery component instead of left/right/case, and have no lid or case.
+     */
+    val isHeadset: Boolean = false
 )
 enum class Capability {
     LISTENING_MODE,
@@ -246,6 +251,47 @@ class AirPodsPro3: AirPodsBase(
     )
 )
 
+class AirPodsMaxLightning: AirPodsBase(
+    modelNumber = listOf("A2096"),
+    name = "AirPods Max (Lightning)",
+    displayName = "AirPods Max",
+    // budCaseRes = R.drawable.airpods_max
+    budCaseRes = R.drawable.airpods_pro_2,
+    // budsRes = R.drawable.airpods_max_buds
+    budsRes = R.drawable.airpods_pro_2_buds,
+    // leftBudsRes = R.drawable.airpods_max_left
+    leftBudsRes = R.drawable.airpods_pro_2_left,
+    // rightBudsRes = R.drawable.airpods_max_right
+    rightBudsRes = R.drawable.airpods_pro_2_right,
+    // caseRes = R.drawable.airpods_max_case
+    caseRes = R.drawable.airpods_pro_2_case,
+    capabilities = setOf(
+        Capability.LISTENING_MODE
+    ),
+    isHeadset = true
+)
+
+class AirPodsMaxUSBC: AirPodsBase(
+    modelNumber = listOf("A3184"),
+    name = "AirPods Max (USB-C)",
+    displayName = "AirPods Max",
+    // budCaseRes = R.drawable.airpods_max
+    budCaseRes = R.drawable.airpods_pro_2,
+    // budsRes = R.drawable.airpods_max_buds
+    budsRes = R.drawable.airpods_pro_2_buds,
+    // leftBudsRes = R.drawable.airpods_max_left
+    leftBudsRes = R.drawable.airpods_pro_2_left,
+    // rightBudsRes = R.drawable.airpods_max_right
+    rightBudsRes = R.drawable.airpods_pro_2_right,
+    // caseRes = R.drawable.airpods_max_case
+    caseRes = R.drawable.airpods_pro_2_case,
+    capabilities = setOf(
+        Capability.LISTENING_MODE,
+        Capability.LOUD_SOUND_REDUCTION
+    ),
+    isHeadset = true
+)
+
 data class AirPodsInstance(
     val name: String,
     val model: AirPodsBase,
@@ -268,10 +314,21 @@ object AirPodsModels {
         AirPodsPro1(),
         AirPodsPro2Lightning(),
         AirPodsPro2USBC(),
-        AirPodsPro3()
+        AirPodsPro3(),
+        AirPodsMaxLightning(),
+        AirPodsMaxUSBC()
     )
 
     fun getModelByModelNumber(modelNumber: String): AirPodsBase? {
         return models.find { modelNumber in it.modelNumber }
     }
+
+    /**
+     * Model number of the model used when a device reports a model number we
+     * don't know about yet. Its capability set is a superset of most models, so
+     * unknown devices keep working instead of losing every feature.
+     */
+    const val FALLBACK_MODEL_NUMBER = "A3049"
+
+    val fallbackModel: AirPodsBase get() = getModelByModelNumber(FALLBACK_MODEL_NUMBER)!!
 }

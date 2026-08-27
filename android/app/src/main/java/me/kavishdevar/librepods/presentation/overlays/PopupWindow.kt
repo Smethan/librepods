@@ -219,6 +219,17 @@ class PopupWindow(
         val batteryRightText = mView.findViewById<TextView>(R.id.right_battery)
         val batteryCaseText = mView.findViewById<TextView>(R.id.case_battery)
 
+        // AirPods Max report one over-ear battery; show it on its own rather than
+        // leaving all three slots blank.
+        val headset = batteryList.find { it.component == BatteryComponent.HEADSET }
+        if (headset != null) {
+            batteryLeftText.text =
+                if (headset.status != BatteryStatus.DISCONNECTED) "${headset.level}%" else ""
+            batteryRightText.text = ""
+            batteryCaseText.text = ""
+            return
+        }
+
         batteryLeftText.text = batteryList.find { it.component == BatteryComponent.LEFT }?.let {
             if (it.status != BatteryStatus.DISCONNECTED) {
                 "\uDBC3\uDC8E    ${it.level}%"
