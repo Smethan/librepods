@@ -65,6 +65,18 @@ class AACPManager {
 
         private val HEADER_BYTES = byteArrayOf(0x04, 0x00, 0x04, 0x00)
 
+        private val MAC_REGEX = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+
+        /**
+         * Every handoff packet carries this phone's own MAC, and each sender
+         * refuses to transmit without a well formed one. If this returns false
+         * for the local address, handoff and takeover do nothing at all.
+         */
+        fun isValidMacAddress(mac: String?): Boolean = mac != null && mac.matches(MAC_REGEX)
+
+        /** MAC comparison that tolerates the two casings floating around. */
+        fun sameMac(a: String?, b: String?): Boolean = a != null && a.equals(b, ignoreCase = true)
+
         data class ControlCommandStatus(
             val identifier: ControlCommandIdentifiers, val value: ByteArray
         ) {
@@ -832,14 +844,10 @@ class AACPManager {
     }
 
     fun sendMediaInformationNewDevice(selfMacAddress: String, targetMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches(
-                Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
-            )
-        ) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
+        if (!isValidMacAddress(selfMacAddress) || !isValidMacAddress(targetMacAddress)) {
             Log.w(
                 TAG,
-                "Invalid MAC address format, got: selfMacAddress=$selfMacAddress, targetMacAddress=$targetMacAddress"
+                "Not sending: invalid MAC address, selfMacAddress='$selfMacAddress', targetMacAddress='$targetMacAddress'"
             )
             return false
         }
@@ -888,14 +896,16 @@ class AACPManager {
     }
 
     fun sendHijackRequest(selfMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.w(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
+        if (!isValidMacAddress(selfMacAddress)) {
+            Log.w(
+                TAG,
+                "Not sending: this phone's own MAC is unknown ('$selfMacAddress'), so handoff cannot work"
+            )
             return false
         }
         var success = false
         for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
+            if (!sameMac(connectedDevice.mac, selfMacAddress)) {
                 Log.d(TAG, "Sending Hijack Request packet to ${connectedDevice.mac}")
                 success = sendDataPacket(createHijackRequestPacket(connectedDevice.mac)) || success
             }
@@ -931,13 +941,15 @@ class AACPManager {
     }
 
     fun sendMediaInformataion(selfMacAddress: String, streamingState: Boolean = false): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.d(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
+        if (!isValidMacAddress(selfMacAddress)) {
+            Log.w(
+                TAG,
+                "Not sending: this phone's own MAC is unknown ('$selfMacAddress'), so handoff cannot work"
+            )
             return false
         }
         Log.d(TAG, "SELFMAC: $selfMacAddress")
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = connectedDevices.find { !sameMac(it.mac, selfMacAddress) }?.mac
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Media Information packet: No connected device found")
             return false
@@ -988,13 +1000,15 @@ class AACPManager {
     }
 
     fun sendSmartRoutingShowUI(selfMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"))) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
-            Log.w(TAG, "Invalid MAC address format, got: selfMacAddress=$selfMacAddress")
+        if (!isValidMacAddress(selfMacAddress)) {
+            Log.w(
+                TAG,
+                "Not sending: this phone's own MAC is unknown ('$selfMacAddress'), so handoff cannot work"
+            )
             return false
         }
 
-        val targetMac = connectedDevices.find { it.mac != selfMacAddress }?.mac
+        val targetMac = connectedDevices.find { !sameMac(it.mac, selfMacAddress) }?.mac
         if (targetMac == null) {
             Log.w(TAG, "Cannot send Smart Routing Show UI packet: No connected device found")
             return false
@@ -1032,9 +1046,16 @@ class AACPManager {
     }
 
     fun sendHijackReversed(selfMacAddress: String): Boolean {
+        if (!isValidMacAddress(selfMacAddress)) {
+            Log.w(
+                TAG,
+                "Not sending: this phone's own MAC is unknown ('$selfMacAddress'), so handoff cannot work"
+            )
+            return false
+        }
         var success = false
         for (connectedDevice in connectedDevices) {
-            if (connectedDevice.mac != selfMacAddress) {
+            if (!sameMac(connectedDevice.mac, selfMacAddress)) {
                 Log.d(TAG, "Sending Hijack Reversed packet to ${connectedDevice.mac}")
                 success = sendDataPacket(createHijackReversedPacket(connectedDevice.mac)) || success
             }
@@ -1066,14 +1087,10 @@ class AACPManager {
 
 
     fun sendAddTiPiDevice(selfMacAddress: String, targetMacAddress: String): Boolean {
-        if (selfMacAddress.length != 17 || !selfMacAddress.matches(Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) || targetMacAddress.length != 17 || !targetMacAddress.matches(
-                Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
-            )
-        ) {
-            // throw IllegalArgumentException("MAC address must be 6 bytes")
+        if (!isValidMacAddress(selfMacAddress) || !isValidMacAddress(targetMacAddress)) {
             Log.w(
                 TAG,
-                "Invalid MAC address format, got: selfMacAddress=$selfMacAddress, targetMacAddress=$targetMacAddress"
+                "Not sending: invalid MAC address, selfMacAddress='$selfMacAddress', targetMacAddress='$targetMacAddress'"
             )
             return false
         }
@@ -1283,7 +1300,14 @@ class AACPManager {
                 )
                 break
             }
-            val macBytes = data.sliceArray(offset until offset + 6)
+            // Little endian on the wire, like every other MAC in this protocol.
+            // parseAudioSourceResponse, the SMART_ROUTING_RESP sender and all six
+            // packet builders reverse; this one did not, so the strings it
+            // produced could never be compared against any of them - which is why
+            // the device naming below and every "is this us?" check silently
+            // failed. Reversing here leaves the bytes we put on the wire
+            // unchanged, because the builders reverse them straight back.
+            val macBytes = data.sliceArray(offset until offset + 6).reversedArray()
             val mac = macBytes.joinToString(":") { "%02X".format(it) }
             val info1 = data[offset + 6]
             val info2 = data[offset + 7]

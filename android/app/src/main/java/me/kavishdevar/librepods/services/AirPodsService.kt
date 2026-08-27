@@ -241,6 +241,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     lateinit var bleManager: BLEManager
 
     companion object {
+        private const val ANONYMIZED_MAC = "02:00:00:00:00:00"
+
         init {
             System.loadLibrary("bluetooth_socket")
         }
@@ -399,33 +401,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 
         sharedPreferences.registerOnSharedPreferenceChangeListener(this)
 
-        localMac = config.selfMacAddress
-        if (localMac.isEmpty()) {
-            if (checkSelfPermission("android.permission.LOCAL_MAC_ADDRESS") == PackageManager.PERMISSION_GRANTED) {
-                val bluetoothManager = getSystemService(BluetoothManager::class.java)
-                val bluetoothAdapter = bluetoothManager.adapter
-                localMac = bluetoothAdapter.address
-            } else {
-                localMac = try {
-                    val process = Runtime.getRuntime().exec(
-                        arrayOf("su", "-c", "settings get secure bluetooth_address")
-                    )
-
-                    val exitCode = process.waitFor()
-
-                    if (exitCode == 0) {
-                        process.inputStream.bufferedReader().use { it.readLine()?.trim().orEmpty() }
-                    } else {
-                        ""
-                    }
-                } catch (e: Exception) {
-                    Log.e(
-                        TAG,
-                        "Error retrieving local MAC address: ${e.message}. We probably aren't rooted."
-                    )
-                    ""
-                }
-            }
+        localMac = resolveLocalMacAddress()
+        if (localMac.isNotEmpty() && localMac != config.selfMacAddress) {
             config.selfMacAddress = localMac
             sharedPreferences.edit {
                 putString("self_mac_address", localMac)
@@ -2329,6 +2306,80 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     }
 
     /**
+     * This phone's own Bluetooth MAC.
+     *
+     * Every handoff/takeover packet carries it, and [AACPManager] refuses to
+     * transmit any of them without a well formed address - so when this comes
+     * back empty, handoff silently does nothing at all. It is only directly
+     * readable by a privileged (root module) install; everything else has to go
+     * looking for it.
+     */
+    @SuppressLint("HardwareIds")
+    private fun resolveLocalMacAddress(): String {
+        val stored = config.selfMacAddress
+        if (isUsableLocalMac(stored)) return stored.uppercase()
+        if (stored.isNotEmpty()) {
+            Log.w(TAG, "Stored local MAC '$stored' is not usable, resolving again")
+        }
+
+        val sources: List<Pair<String, () -> String?>> = listOf(
+            "BluetoothAdapter.getAddress()" to {
+                if (checkSelfPermission("android.permission.LOCAL_MAC_ADDRESS") == PackageManager.PERMISSION_GRANTED) {
+                    getSystemService(BluetoothManager::class.java)?.adapter?.address
+                } else {
+                    null
+                }
+            },
+            // Readable without root on ROMs that still expose the key, and free
+            // to try on the ones that don't.
+            "Settings.Secure/bluetooth_address" to {
+                Settings.Secure.getString(contentResolver, "bluetooth_address")
+            },
+            "su: settings get secure bluetooth_address" to {
+                val process = Runtime.getRuntime().exec(
+                    arrayOf("su", "-c", "settings get secure bluetooth_address")
+                )
+                val output =
+                    process.inputStream.bufferedReader().use { it.readLine()?.trim().orEmpty() }
+                if (process.waitFor() == 0) output else null
+            }
+        )
+
+        for ((name, read) in sources) {
+            val value = try {
+                read()
+            } catch (e: Exception) {
+                Log.d(TAG, "Local MAC not available from $name: ${e.message}")
+                continue
+            }
+            if (isUsableLocalMac(value)) {
+                Log.d(TAG, "Local MAC resolved from $name")
+                return value!!.uppercase()
+            }
+            // "settings get" prints the literal string "null" for a missing key,
+            // and an unprivileged getAddress() returns the anonymised address;
+            // both used to be stored and used as if they were real.
+            Log.d(TAG, "Local MAC not usable from $name (got '${value ?: ""}')")
+        }
+
+        Log.w(
+            TAG,
+            "Could not determine this phone's Bluetooth MAC. Handoff, takeover and " +
+                "\"reconnect when last connected here\" all send it to the AirPods and will be " +
+                "skipped. Install LibrePods as a privileged app with the root module, or grant " +
+                "it root, or set self_mac_address manually."
+        )
+        return ""
+    }
+
+    /**
+     * An unprivileged `BluetoothAdapter.getAddress()` returns the anonymised
+     * `02:00:00:00:00:00`, which passes a plain MAC regex but is not our address.
+     */
+    private fun isUsableLocalMac(mac: String?): Boolean =
+        AACPManager.isValidMacAddress(mac) && !mac.equals(ANONYMIZED_MAC, ignoreCase = true)
+
+    /**
      * Builds the [AirPodsInstance] describing the connected device from whatever
      * the device told us about itself. Model numbers we don't know about still
      * produce an instance carrying the real model number and name - previously
@@ -2515,9 +2566,28 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             TAG, "owns connection: $ownsConnection"
         )
         if (BluetoothConnectionManager.aacpSocket?.isConnected == true) {
-            if (!XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false) || ownsConnection == 0) {
-                Log.d(TAG, "not taking over, vendorid is probably not set to apple")
+            // Split apart so the log says which of the two actually stopped us;
+            // these have very different fixes.
+            if (!XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)) {
+                Log.d(
+                    TAG,
+                    "not taking over: the vendor id hook is off, or the Xposed service isn't bound " +
+                        "yet, so the AirPods don't see this phone as an Apple device"
+                )
                 return
+            }
+            if (ownsConnection == 0) {
+                Log.d(TAG, "not taking over: the AirPods say we don't own the connection")
+                return
+            }
+            if (!isUsableLocalMac(localMac)) {
+                // Not fatal here - connectAudio below can still do something - but
+                // every AACP handoff packet will be dropped before it is sent.
+                Log.w(
+                    TAG,
+                    "taking over without a usable local MAC ('$localMac'); the AirPods will not be " +
+                        "told to hand off, see resolveLocalMacAddress()"
+                )
             }
             if (aacpManager.getControlCommandStatus(AACPManager.Companion.ControlCommandIdentifiers.OWNS_CONNECTION)?.value[0]?.toInt() != 1 || (aacpManager.audioSource?.mac != localMac && aacpManager.audioSource?.type != AACPManager.Companion.AudioSourceType.NONE)) {
                 if (disconnectedBecauseReversed) {

@@ -95,6 +95,7 @@ import me.kavishdevar.librepods.presentation.theme.DesignSystem
 import me.kavishdevar.librepods.presentation.theme.LocalDesignSystem
 import me.kavishdevar.librepods.presentation.theme.MaterialTypography
 import me.kavishdevar.librepods.presentation.viewmodel.AppSettingsViewModel
+import me.kavishdevar.librepods.services.ServiceManager
 import me.kavishdevar.librepods.utils.XposedState
 import java.util.concurrent.TimeUnit
 
@@ -576,6 +577,7 @@ fun AppSettingsScreen(
                                    "\nDISPLAY_VERSION: ${Build.DISPLAY}" +
                                    "\nID: ${Build.ID} (SDK ${Build.VERSION.SDK_INT_FULL})" +
                                    "\nXposed enabled/active: ${XposedState.isAvailable}/${XposedState.bluetoothScopeEnabled}" +
+                                   "\nLocal BT MAC known: ${ServiceManager.getService()?.localMac?.isNotEmpty() == true}" +
                                    "\n\nApp details:" +
                                    "\nVERSION: ${BuildConfig.VERSION_NAME}" +
                                    "\nVERSION_CODE: ${BuildConfig.VERSION_CODE}" +
