@@ -244,6 +244,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     companion object {
         private const val ANONYMIZED_MAC = "02:00:00:00:00:00"
 
+        // Upper bound on how long a single L2CAP connect may block before we
+        // abandon it. Long enough for a legitimately slow connect to a nearby
+        // paired device, short enough that a hung attempt cannot wedge
+        // reconnection for long.
+        private const val SOCKET_CONNECT_TIMEOUT_MS = 6000L
+
         init {
             System.loadLibrary("bluetooth_socket")
         }
@@ -263,7 +269,12 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                         "mac_address", ""
                     ) ?: ""
                 )
-                connectToSocket(bluetoothAdapter, bluetoothDevice)
+                // BLE scan callbacks are delivered on the main thread; connecting
+                // the L2CAP socket can block, so keep it off the UI thread like
+                // the other reconnect triggers do.
+                CoroutineScope(Dispatchers.IO).launch {
+                    connectToSocket(bluetoothAdapter, bluetoothDevice)
+                }
             }
             Log.d(TAG, "Device status changed")
             if (BluetoothConnectionManager.aacpSocket?.isConnected == true) return
@@ -685,14 +696,24 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
 //                    }
 
                 } else if (intent?.action == AirPodsNotifications.AIRPODS_DISCONNECTED) {
-                    device = null
-//                    isConnectedLocally = false
-                    popupShown = false
-                    updateNotificationContent(false)
-                    aacpManager.disconnected()
-                    attManager.disconnected()
-                    BluetoothConnectionManager.aacpSocket = null
-                    BluetoothConnectionManager.attSocket = null
+                    // This broadcast is asynchronous, so a fast reconnect may have
+                    // already established a new live session by the time it is
+                    // delivered. tearDownConnection now owns socket cleanup; only
+                    // clear state here when nothing is currently connected, so a
+                    // stale DISCONNECTED can't null out the socket of a session
+                    // that just came up.
+                    if (BluetoothConnectionManager.aacpSocket?.isConnected != true) {
+                        device = null
+//                        isConnectedLocally = false
+                        popupShown = false
+                        updateNotificationContent(false)
+                        aacpManager.disconnected()
+                        attManager.disconnected()
+                        BluetoothConnectionManager.aacpSocket = null
+                        BluetoothConnectionManager.attSocket = null
+                    } else {
+                        Log.d(TAG, "Ignoring stale AIRPODS_DISCONNECTED; a live session exists")
+                    }
                 }
             }
         }
@@ -2796,8 +2817,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 return
             }
 
-            try {
-                socket.connect()
+            val connected = try {
+                connectWithTimeout(socket, SOCKET_CONNECT_TIMEOUT_MS)
             } catch (e: Exception) {
                 Log.d(TAG, "<LogCollector:Complete:Failed> Socket not connected, ${e.message}")
                 // A socket we failed to connect still holds a file descriptor and,
@@ -2812,8 +2833,10 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
                 return
             }
 
-            if (!socket.isConnected) {
-                Log.d(TAG, "<LogCollector:Complete:Failed> socket not connected")
+            if (!connected) {
+                Log.d(TAG, "<LogCollector:Complete:Failed> socket not connected (timeout)")
+                // connectWithTimeout already closed the socket on timeout; close
+                // is idempotent.
                 closeQuietly(socket)
                 if (manual) {
                     sendToast("Couldn't connect to socket: timeout.")
@@ -2857,7 +2880,7 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             // devices that don't implement those handles, so it must never sit on
             // the path that brings the AACP session up.
             CoroutineScope(Dispatchers.IO).launch {
-                connectAttChannel(adapter, device)
+                connectAttChannel(adapter, device, socket)
             }
 
             CoroutineScope(Dispatchers.IO).launch {
@@ -2946,7 +2969,9 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
      * doesn't implement one never answers, so each read costs a full timeout.
      */
     @SuppressLint("MissingPermission")
-    private fun connectAttChannel(adapter: BluetoothAdapter, device: BluetoothDevice) {
+    private fun connectAttChannel(
+        adapter: BluetoothAdapter, device: BluetoothDevice, ownerSocket: BluetoothSocket
+    ) {
         if (!XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)) return
         if (BluetoothConnectionManager.attSocket != null) return
 
@@ -2963,6 +2988,17 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
             attSocket.connect()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to connect ATT socket: ${e.message}")
+            closeQuietly(attSocket)
+            return
+        }
+
+        // The AACP session that asked for this ATT channel may have already died
+        // and been torn down (or replaced) while we were connecting. Adopting the
+        // ATT socket now would leak it - tearDownConnection has already run and
+        // nothing else will close it, and its non-null reference would block the
+        // next session from ever opening ATT.
+        if (BluetoothConnectionManager.aacpSocket !== ownerSocket) {
+            Log.d(TAG, "AACP session changed while ATT was connecting, discarding ATT socket")
             closeQuietly(attSocket)
             return
         }
@@ -2990,6 +3026,43 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         } catch (e: Exception) {
             Log.w(TAG, "Error closing socket: ${e.message}")
         }
+    }
+
+    /**
+     * Connects [socket] but never blocks the caller longer than [timeoutMs].
+     *
+     * `BluetoothSocket.connect()` is a blocking JVM call that a coroutine
+     * `withTimeout` cannot interrupt, so a hung L2CAP connect used to pin the
+     * calling thread indefinitely - and, because [socketConnectInProgress] is
+     * held for the whole attempt, wedge every future reconnect trigger. The
+     * standard way to abort a stuck connect is to close the socket from another
+     * thread, which makes `connect()` throw. Returns true only if the socket is
+     * connected within the budget; on timeout it closes the socket and returns
+     * false. Rethrows a genuine connect failure so the caller can report it.
+     */
+    private fun connectWithTimeout(socket: BluetoothSocket, timeoutMs: Long): Boolean {
+        var connectError: Exception? = null
+        val connectThread = Thread {
+            try {
+                socket.connect()
+            } catch (e: Exception) {
+                connectError = e
+            }
+        }.apply { isDaemon = true; name = "AACP-Connect" }
+
+        connectThread.start()
+        connectThread.join(timeoutMs)
+
+        if (connectThread.isAlive) {
+            Log.w(TAG, "socket.connect() exceeded ${timeoutMs}ms, abandoning attempt")
+            // Unblocks the abandoned thread (connect() throws) and releases the
+            // reentrancy guard instead of pinning it forever.
+            closeQuietly(socket)
+            return false
+        }
+
+        connectError?.let { throw it }
+        return socket.isConnected
     }
 
     /** Releases everything tied to one AACP session, whichever way it ended. */
