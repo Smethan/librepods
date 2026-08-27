@@ -1,6 +1,7 @@
 import java.util.Properties
 
 val appVersionName = "1.0.0-rc2"
+val appVersionCode = 63
 
 plugins {
     alias(libs.plugins.android.application)
@@ -49,7 +50,7 @@ android {
     defaultConfig {
         applicationId = "me.kavishdevar.librepods"
         targetSdk = 37
-        versionCode = 63
+        versionCode = appVersionCode
         versionName = appVersionName
     }
     buildTypes {
@@ -183,8 +184,33 @@ fun registerRootModuleZipTask(
     dependsOn(variantTask)
 
     val apkPath = "outputs/apk/$flavor/$buildType/app-$flavor-$buildType.apk"
+    val zipOutputDir = layout.buildDirectory.dir("outputs/rootModuleZips")
 
-    from(rootModuleDir)
+    // Held as plain locals so the lambdas below capture strings rather than a
+    // reference to this build script, which the configuration cache rejects.
+    val zipName = "LibrePods-FOSS-v$appVersionName-$buildType.zip"
+    val zipSuffix = "-$buildType.zip"
+    val moduleVersion = "v$appVersionName"
+    val moduleVersionCode = appVersionCode.toString()
+
+    from(rootModuleDir) {
+        exclude("module.prop")
+    }
+
+    // module.prop is hand written, and its version had drifted several releases
+    // behind the app it ships. Magisk reads the module version from here, so it
+    // reported the wrong one and compared a stale versionCode against updateJson,
+    // meaning module updates were never offered. Stamp the real version in.
+    from(rootModuleDir) {
+        include("module.prop")
+        filter { line: String ->
+            when {
+                line.startsWith("version=") -> "version=$moduleVersion"
+                line.startsWith("versionCode=") -> "versionCode=$moduleVersionCode"
+                else -> line
+            }
+        }
+    }
 
     duplicatesStrategy = DuplicatesStrategy.WARN
 
@@ -193,10 +219,21 @@ fun registerRootModuleZipTask(
         rename { "LibrePods.apk" }
     }
 
-    delete(layout.buildDirectory.dir("outputs/rootModuleZips"))
+    archiveFileName.set(zipName)
+    destinationDirectory.set(zipOutputDir)
 
-    archiveFileName.set("LibrePods-FOSS-v$appVersionName-$buildType.zip")
-    destinationDirectory.set(layout.buildDirectory.dir("outputs/rootModuleZips"))
+    doFirst {
+        // Drop stale zips of this build type so collectReleaseArtifacts cannot
+        // pick up one from an older version. This used to be a Project.delete()
+        // in the task body, which ran at configuration time - on every build,
+        // including ones that produce no zip at all - and wiped the other build
+        // type's zip along with it.
+        zipOutputDir.get().asFile.listFiles()?.forEach { file ->
+            if (file.name.endsWith(zipSuffix) && file.name != zipName) {
+                file.delete()
+            }
+        }
+    }
 }
 
 val zipRelease = registerRootModuleZipTask(

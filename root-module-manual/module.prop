@@ -1,7 +1,9 @@
 id=librepods
 name=LibrePods
+# version and versionCode are stamped from the app version when the zip is
+# built; the values here are only a placeholder for manual installs.
 version=v0.2.6
 versionCode=46
 author=@kavishdevar
-description=Installs LibrePods as a system app for granting BLUETOOTH_PRIVILEGED and MODIFY_PHONE_STATE permission for better integraion with android.
+description=Installs LibrePods as a privileged system app so it can be granted BLUETOOTH_PRIVILEGED, MODIFY_PHONE_STATE, INTERACT_ACROSS_USERS and LOCAL_MAC_ADDRESS, for better integration with Android. LOCAL_MAC_ADDRESS is required for handoff and takeover.
 updateJson=https://raw.githubusercontent.com/kavishdevar/librepods/main/extras/update_nonpatch.json

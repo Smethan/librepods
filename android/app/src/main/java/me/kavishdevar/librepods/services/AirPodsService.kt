@@ -43,6 +43,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Resources
 import android.graphics.Color
@@ -400,6 +401,8 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         attManager = ATTManagerv2()
 
         sharedPreferences.registerOnSharedPreferenceChangeListener(this)
+
+        logPrivilegedInstallState()
 
         localMac = resolveLocalMacAddress()
         if (localMac.isNotEmpty() && localMac != config.selfMacAddress) {
@@ -2303,6 +2306,37 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
         }
 
         Log.d(TAG, "Broadcast battery level $batteryUnified% to system")
+    }
+
+    /**
+     * Logs whether this really is a privileged system install.
+     *
+     * The root module drops the APK in /system/priv-app and whitelists four
+     * signature|privileged permissions. Plenty of things stop that taking
+     * effect - a copy installed the ordinary way under /data/app shadowing the
+     * system one, a signature mismatch between the two, or the module simply not
+     * being mounted - and the app's symptoms are the same in every case:
+     * privileged calls quietly do nothing. `sourceDir` settles it in one line.
+     */
+    private fun logPrivilegedInstallState() {
+        val info = applicationInfo
+        val permissions = listOf(
+            "BLUETOOTH_PRIVILEGED",
+            "MODIFY_PHONE_STATE",
+            "INTERACT_ACROSS_USERS",
+            "LOCAL_MAC_ADDRESS"
+        ).joinToString(" ") { name ->
+            val granted =
+                checkSelfPermission("android.permission.$name") == PackageManager.PERMISSION_GRANTED
+            "$name=${if (granted) "granted" else "DENIED"}"
+        }
+        Log.i(
+            TAG,
+            "Install: systemApp=${(info.flags and ApplicationInfo.FLAG_SYSTEM) != 0} " +
+                "updatedSystemApp=${(info.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0} " +
+                "sourceDir=${info.sourceDir}"
+        )
+        Log.i(TAG, "Privileged permissions: $permissions")
     }
 
     /**
