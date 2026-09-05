@@ -2972,7 +2972,22 @@ class AirPodsService : Service(), SharedPreferences.OnSharedPreferenceChangeList
     private fun connectAttChannel(
         adapter: BluetoothAdapter, device: BluetoothDevice, ownerSocket: BluetoothSocket
     ) {
-        if (!XposedRemotePrefProvider.create().getBoolean("vendor_id_hook", false)) return
+        val xposedPrefs = XposedRemotePrefProvider.create()
+        if (!xposedPrefs.getBoolean("vendor_id_hook", false)) return
+        // The ATT channel is a *second* L2CAP channel, and it only serves the
+        // hearing aid, transparency and accessibility characteristics - nothing
+        // on the AACP session depends on it. On some firmware/controller
+        // combinations opening it makes the AirPods stop answering on the ACL
+        // link, which then dies of HCI_ERR_CONNECTION_TOUT about 38s later and
+        // takes every profile down with it, over and over. Measured on AirPods
+        // Max (A3184) against a Nothing Phone (3a) Pro on Android 16: with the
+        // channel open the link died every 38-43s indefinitely; with it closed
+        // and nothing else changed, the same session ran 14+ minutes clean.
+        // So it is opt-in on its own rather than riding on the vendor id hook.
+        if (!xposedPrefs.getBoolean("att_channel", false)) {
+            Log.d(TAG, "not opening the ATT channel: att_channel is off")
+            return
+        }
         if (BluetoothConnectionManager.attSocket != null) return
 
         val attSocket = try {
