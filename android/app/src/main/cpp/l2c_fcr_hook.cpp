@@ -396,18 +396,25 @@ static bool hookLibrary(const char *libname) {
         return false;
     }
 
-    if (chk_offset) {
+    // hookLibrary can now be reached from two places - the dlopen callback and
+    // the already-mapped sweep in native_init - so refuse to hook a symbol that
+    // is already trampolined. Hooking twice chains the trampoline onto itself.
+    if (chk_offset && !original_l2c_fcr_chk_chan_modes) {
         void *target = reinterpret_cast<void *>(base + chk_offset);
         hook_func(target, (void *) fake_l2c_fcr_chk_chan_modes,
                   (void **) &original_l2c_fcr_chk_chan_modes);
         LOGI("hooked chk");
+    } else if (chk_offset) {
+        LOGI("chk already hooked, skipping");
     }
 
-    if (sdp_offset) {
+    if (sdp_offset && !original_BTA_DmSetLocalDiRecord) {
         void *target = reinterpret_cast<void *>(base + sdp_offset);
         hook_func(target, (void *) fake_BTA_DmSetLocalDiRecord,
                   (void **) &original_BTA_DmSetLocalDiRecord);
         LOGI("hooked sdp");
+    } else if (sdp_offset) {
+        LOGI("sdp already hooked, skipping");
     }
 
     return chk_offset || sdp_offset;
@@ -432,6 +439,23 @@ extern "C" [[gnu::visibility("default")]]
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
     LOGI("native_init called with entries: %p", entries);
     hook_func = (HookFunType) entries->hook_func;
+
+    // on_library_loaded only fires for libraries dlopen'd after this point. In
+    // the Bluetooth process libbluetooth_jni.so is routinely mapped before the
+    // module is initialized, and in that case no callback ever arrives, so the
+    // hook silently never applied and l2c_fcr_chk_chan_modes kept rejecting the
+    // channel modes AirPods need. hookLibrary resolves both the file path and
+    // the load base from /proc/self/maps, so it works just as well on a library
+    // that is already present - sweep for those now.
+    for (const char *lib : {"libbluetooth_jni.so", "libbluetooth_qti.so"}) {
+        if (getModuleBase(lib)) {
+            LOGI("native_init: %s already mapped, hooking it now", lib);
+            hookLibrary(lib);
+        } else {
+            LOGI("native_init: %s not mapped yet, waiting for dlopen", lib);
+        }
+    }
+
     LOGI("LibrePodsNativeHook initialized, sdp hook enabled: %d",
          enableSdpHook.load(std::memory_order_relaxed));
     return on_library_loaded;
