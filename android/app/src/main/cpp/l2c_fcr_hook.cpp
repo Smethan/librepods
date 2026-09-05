@@ -202,7 +202,9 @@ static uintptr_t getModuleBase(const char *name) {
     }
 
     fclose(fp);
-    LOGI("getModuleBase: failed to find base for %s", name);
+    if (!base) {
+        LOGI("getModuleBase: failed to find base for %s", name);
+    }
     return base;
 }
 
